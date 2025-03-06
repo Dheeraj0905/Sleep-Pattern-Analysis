@@ -3,10 +3,10 @@
 ## Audio - Snoring detection model
 
 1. Get the dataset from https://www.kaggle.com/datasets/tareqkhanemu/snoring/data
-2. see the sample implementations using the above dataset
+2. see the sample implementations using the above dataset - prefer snoring-wav.ipynb
 3. use cnn and lstm to train the model
 4. put the saved model in the models folder - to be accessed by the streamlit app
-Note : The idea of the snoring detecting model is to calculate the frequency of snoring
+   Note : The idea of the snoring detecting model is to calculate the frequency of snoring
 
 ## CSV - Sleep Factors - detecting sleep anomaly and sleep quality and attributes
 
