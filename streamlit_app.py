@@ -191,7 +191,7 @@ class SleepAnalyzer:
             return None
         
         try:
-            # First, get all required components from the loaded model data
+            # Get all required components from the loaded model data
             model = self.disorder_model['model']
             label_encoders = self.disorder_model['label_encoders']
             target_encoder = self.disorder_model['target_encoder']
@@ -252,45 +252,136 @@ class SleepAnalyzer:
             prediction = target_encoder.inverse_transform([pred_encoded])[0]
             
             # Get probabilities for each class
-            probabilities = None
-            if hasattr(model, 'predict_proba'):
-                pred_proba = model.predict_proba(sample_df)[0]
-                prob_dict = {target_encoder.inverse_transform([i])[0]: prob for i, prob in enumerate(pred_proba)}
-                probabilities = prob_dict
+            pred_proba = model.predict_proba(sample_df)[0]
+            prob_dict = {target_encoder.inverse_transform([i])[0]: prob for i, prob in enumerate(pred_proba)}
+            
+            # Determine if we should predict "None" based on probability thresholds
+            # If no disorder has high enough confidence, classify as "None"
+            max_prob_key = max(prob_dict, key=prob_dict.get)
+            max_prob_value = prob_dict[max_prob_key]
+            
+            # If the maximum probability is less than 0.5, classify as "None"
+            # Adjust this threshold as necessary
+            if max_prob_value < 0.5:
+                prediction = "None"
+                # Add or adjust the "None" probability in the dictionary
+                if "None" in prob_dict:
+                    prob_dict["None"] = max(prob_dict["None"], 1 - max_prob_value)
+                else:
+                    prob_dict["None"] = 1 - max_prob_value
             
             return {
                 'prediction': prediction,
-                'probabilities': probabilities
+                'probabilities': prob_dict
             }
             
         except Exception as e:
             st.error(f"Error predicting sleep disorder: {str(e)}")
             import traceback
             st.error(f"Traceback: {traceback.format_exc()}")
-            st.write(f"Debug info - model type: {type(self.disorder_model)}")
-            st.write(f"Debug info - input columns: {list(input_data.columns)}")
             return None
     
     def predict_sleep_quality(self, input_data):
-        """Predict sleep quality from input data"""
+        """Predict sleep quality score from physiological metrics"""
         if not self.quality_model_loaded:
             st.error("Sleep quality model not loaded.")
             return None
         
         try:
-            # Scale features
-            scaled_features = self.quality_scaler.fit_transform(input_data)
+            st.write(f"Input sleep duration data: {input_data['Sleep_Duration']}")
+            # Access the model and preprocessing info
+            model = self.quality_model['model'] if isinstance(self.quality_model, dict) else self.quality_model
+            scaler = self.quality_model.get('scaler', None) if isinstance(self.quality_model, dict) else None
+            feature_list = self.quality_model.get('feature_list', None) if isinstance(self.quality_model, dict) else None
+            
+            # Debug information
+            st.write(f"Quality model type: {type(model)}")
+            
+            # Clone input data to avoid modifying original
+            sample_df = input_data.copy()
+            st.write(f"Sample_df before: {sample_df}")
+            # Map variable names if needed
+            # This step ensures we use the right feature names as expected by the model
+            # If your model expects Sleep_Duration but you have Sleep Duration in your input
+            if 'Sleep Duration' in sample_df.columns and 'Sleep_Duration' not in sample_df.columns:
+                sample_df['Sleep_Duration'] = sample_df['Sleep Duration']
+            
+            if 'Stress Level' in sample_df.columns and 'Stress_Level' not in sample_df.columns:
+                sample_df['Stress_Level'] = sample_df['Stress Level']
+            
+            # Feature engineering for sleep quality model
+            # sample_df['Sleep_Efficiency'] = (sample_df['Sleep_Duration'] * sample_df['Bedtime_Consistency']) / 10
+            # sample_df['Temperature_Movement_Factor'] = sample_df['Body_Temperature'] * sample_df['Movement_During_Sleep']
+            # sample_df['Caffeine_Light_Ratio'] = sample_df['Caffeine_Intake_mg'] / (sample_df['Light_Exposure_hours'] * 50 + 1)
+            
+            # If we have a scaler, use it
+            if scaler is not None:
+                numerical_cols = sample_df.select_dtypes(include=['float64', 'int64']).columns
+                sample_df[numerical_cols] = scaler.transform(sample_df[numerical_cols])
+            st.write(f"Sample_df after: {sample_df}")
+            # Ensure features are in the correct order if we have the feature list
+            if feature_list:
+                for feature in feature_list:
+                    if feature not in sample_df.columns:
+                        sample_df[feature] = 0
+                sample_df = sample_df[feature_list]
             
             # Make prediction
-            prediction = self.quality_model.predict(scaled_features)
+            raw_prediction = model.predict(sample_df)
             
-            # Return result
+            # Convert prediction to a scalar if it's an array
+            if hasattr(raw_prediction, '__iter__'):
+                raw_prediction = raw_prediction[0]
+            
+            # Convert the prediction to a sleep quality score on a 1-10 scale
+            # Different models might need different scaling approaches
+            
+            # First, determine the range of possible values for your model
+            # For regression models, this might be based on the training data range
+            # For some models, like Random Forest, it might be the specific output range
+            
+            # Method 1: Linear scaling from the model's output range to 1-10
+            # Assuming the model predicts values in a different range, e.g., 0-1 or 0-100
+            min_model_output = 0.0  # Adjust based on your model's minimum output
+            max_model_output = 1.0  # Adjust based on your model's maximum output
+            
+            # Clamp the raw prediction to the expected range
+            clamped_prediction = max(min_model_output, min(max_model_output, raw_prediction))
+            
+            # Scale to 1-10 range
+            quality_score = 1 + (clamped_prediction - min_model_output) * 9 / (max_model_output - min_model_output)
+            
+            # Method 2: Calculate a weighted score based on input features
+            # This can serve as a backup if the model isn't giving varied outputs
+            weighted_score = (
+                (10 - sample_df['Movement_During_Sleep'].iloc[0] * 2) * 0.2 +
+                (sample_df['Sleep_Duration'].iloc[0] / 10 * 10) * 0.3 +
+                (10 - sample_df['Caffeine_Intake_mg'].iloc[0] / 50) * 0.1 +
+                (10 - sample_df['Stress_Level'].iloc[0]) * 0.15 +
+                (sample_df['Bedtime_Consistency'].iloc[0] * 10) * 0.15 +
+                (sample_df['Light_Exposure_hours'].iloc[0] / 12 * 10) * 0.1
+            )
+            weighted_score = max(1, min(10, weighted_score))
+            
+            # Use a combination of both methods, favoring the model when it gives reasonable values
+            if abs(quality_score - 2.6) < 0.1:  # If the model keeps giving ~2.6
+                final_score = weighted_score
+            else:
+                final_score = quality_score
+            
+            # For debugging: show both scores
+            st.write(f"Model raw score: {raw_prediction}, Scaled: {quality_score}, Weighted: {weighted_score}")
+            
             return {
-                'prediction': prediction[0],
-                'score': float(prediction[0])
+                # 'score': final_score,
+                'score': raw_prediction,
+                'raw_prediction': raw_prediction
             }
+            
         except Exception as e:
             st.error(f"Error predicting sleep quality: {str(e)}")
+            import traceback
+            st.error(f"Traceback: {traceback.format_exc()}")
             return None
     
     def create_visualization(self, audio_path, results):
@@ -450,8 +541,8 @@ def main():
     st.set_page_config(page_title="Comprehensive Sleep Analysis", layout="wide")
     
     st.title("Comprehensive Sleep Analysis")
-    st.write(f"Date: 2025-03-07 12:59:44")
-    st.write(f"User: Mangun10")
+    st.write(f"Current Date and Time (UTC): 2025-03-07 15:54:46")
+    st.write(f"Current User's Login: Mangun10")
     
     # Initialize analyzer
     analyzer = SleepAnalyzer(
@@ -464,10 +555,8 @@ def main():
     tab1, tab2 = st.tabs(["Input Data", "Analysis Results"])
     
     # Variables to store inputs and results
-    if 'disorder_inputs' not in st.session_state:
-        st.session_state.disorder_inputs = {}
-    if 'quality_inputs' not in st.session_state:
-        st.session_state.quality_inputs = {}
+    if 'shared_inputs' not in st.session_state:
+        st.session_state.shared_inputs = {}
     if 'audio_results' not in st.session_state:
         st.session_state.audio_results = None
     if 'disorder_results' not in st.session_state:
@@ -484,23 +573,21 @@ def main():
         st.header("Sleep Analysis Input Data")
         
         # Create sections with expanders
-        with st.expander("Personal & Lifestyle Data", expanded=True):
-            st.write("Enter your personal information for sleep disorder assessment:")
-            
+        with st.expander("Personal & Sleep Data", expanded=True):
             col1, col2 = st.columns(2)
             
             with col1:
                 # Basic information
                 gender_options = ["Male", "Female"]
                 gender = st.selectbox("Gender", gender_options, 
-                                  index=gender_options.index(st.session_state.disorder_inputs.get('Gender', "Male")),
-                                  key="gender_disorder")
-                st.session_state.disorder_inputs['Gender'] = gender
+                                  index=gender_options.index(st.session_state.shared_inputs.get('Gender', "Male")),
+                                  key="gender")
+                st.session_state.shared_inputs['Gender'] = gender
                 
                 age = st.number_input("Age", min_value=18, max_value=100, 
-                                  value=st.session_state.disorder_inputs.get('Age', 30),
-                                  key="age_disorder")
-                st.session_state.disorder_inputs['Age'] = age
+                                  value=st.session_state.shared_inputs.get('Age', 30),
+                                  key="age")
+                st.session_state.shared_inputs['Age'] = age
                 
                 # Use the occupation list from the data
                 occupation_options = ["Software Engineer", "Doctor", "Sales Representative", "Teacher",
@@ -508,61 +595,61 @@ def main():
                         "Salesperson", "Manager"]
                         
                 occupation = st.selectbox("Occupation", occupation_options,
-                                      index=occupation_options.index(st.session_state.disorder_inputs.get('Occupation', "Software Engineer")) if st.session_state.disorder_inputs.get('Occupation') in occupation_options else 0,
-                                      key="occupation_disorder")
-                st.session_state.disorder_inputs['Occupation'] = occupation
+                                      index=occupation_options.index(st.session_state.shared_inputs.get('Occupation', "Software Engineer")) if st.session_state.shared_inputs.get('Occupation') in occupation_options else 0,
+                                      key="occupation")
+                st.session_state.shared_inputs['Occupation'] = occupation
                 
                 sleep_duration = st.slider("Sleep Duration (hours)", 3.0, 12.0, 
-                                       st.session_state.disorder_inputs.get('Sleep Duration', 7.0), 0.1,
-                                       key="sleep_duration_disorder")
-                st.session_state.disorder_inputs['Sleep Duration'] = sleep_duration
+                                       st.session_state.shared_inputs.get('Sleep Duration', 7.0), 0.1,
+                                       key="sleep_duration")
+                st.session_state.shared_inputs['Sleep Duration'] = sleep_duration
                 
                 quality_of_sleep = st.slider("Quality of Sleep (1-10)", 1, 10, 
-                                         st.session_state.disorder_inputs.get('Quality of Sleep', 7),
-                                         key="quality_of_sleep_disorder")
-                st.session_state.disorder_inputs['Quality of Sleep'] = quality_of_sleep
-            
+                                         st.session_state.shared_inputs.get('Quality of Sleep', 7),
+                                         key="quality_of_sleep")
+                st.session_state.shared_inputs['Quality of Sleep'] = quality_of_sleep
+                
+                stress_level = st.slider("Stress Level (1-10)", 1, 10, 
+                                     st.session_state.shared_inputs.get('Stress Level', 5),
+                                     key="stress_level")
+                st.session_state.shared_inputs['Stress Level'] = stress_level
+                
             with col2:
                 # Health metrics
                 physical_activity = st.slider("Physical Activity Level (minutes/day)", 0, 120, 
-                                          st.session_state.disorder_inputs.get('Physical Activity Level', 30),
-                                          key="physical_activity_disorder")
-                st.session_state.disorder_inputs['Physical Activity Level'] = physical_activity
-                
-                stress_level = st.slider("Stress Level (1-10)", 1, 10, 
-                                     st.session_state.disorder_inputs.get('Stress Level', 5),
-                                     key="stress_level_disorder")
-                st.session_state.disorder_inputs['Stress Level'] = stress_level
+                                          st.session_state.shared_inputs.get('Physical Activity Level', 30),
+                                          key="physical_activity")
+                st.session_state.shared_inputs['Physical Activity Level'] = physical_activity
                 
                 bmi_options = ["Normal", "Overweight", "Obese", "Underweight"]
                 bmi_category = st.selectbox("BMI Category", bmi_options,
-                                        index=bmi_options.index(st.session_state.disorder_inputs.get('BMI Category', "Normal")),
-                                        key="bmi_category_disorder")
-                st.session_state.disorder_inputs['BMI Category'] = bmi_category
+                                        index=bmi_options.index(st.session_state.shared_inputs.get('BMI Category', "Normal")),
+                                        key="bmi_category")
+                st.session_state.shared_inputs['BMI Category'] = bmi_category
                 
                 # Blood pressure input (systolic/diastolic)
                 col2a, col2b = st.columns(2)
                 with col2a:
                     systolic = st.number_input("Systolic BP (mmHg)", min_value=90, max_value=200, 
-                                          value=st.session_state.disorder_inputs.get('Systolic BP', 120),
-                                          key="systolic_bp_disorder")
-                    st.session_state.disorder_inputs['Systolic BP'] = systolic
+                                          value=st.session_state.shared_inputs.get('Systolic BP', 120),
+                                          key="systolic_bp")
+                    st.session_state.shared_inputs['Systolic BP'] = systolic
                 
                 with col2b:
                     diastolic = st.number_input("Diastolic BP (mmHg)", min_value=40, max_value=120, 
-                                           value=st.session_state.disorder_inputs.get('Diastolic BP', 80),
-                                           key="diastolic_bp_disorder")
-                    st.session_state.disorder_inputs['Diastolic BP'] = diastolic
+                                           value=st.session_state.shared_inputs.get('Diastolic BP', 80),
+                                           key="diastolic_bp")
+                    st.session_state.shared_inputs['Diastolic BP'] = diastolic
                 
                 heart_rate = st.number_input("Heart Rate (bpm)", min_value=40, max_value=200, 
-                                        value=st.session_state.disorder_inputs.get('Heart Rate', 75),
-                                        key="heart_rate_disorder")
-                st.session_state.disorder_inputs['Heart Rate'] = heart_rate
+                                        value=st.session_state.shared_inputs.get('Heart Rate', 75),
+                                        key="heart_rate")
+                st.session_state.shared_inputs['Heart Rate'] = heart_rate
                 
                 daily_steps = st.number_input("Daily Steps", min_value=0, max_value=30000, 
-                                         value=st.session_state.disorder_inputs.get('Daily Steps', 7000),
-                                         key="daily_steps_disorder")
-                st.session_state.disorder_inputs['Daily Steps'] = daily_steps
+                                         value=st.session_state.shared_inputs.get('Daily Steps', 7000),
+                                         key="daily_steps")
+                st.session_state.shared_inputs['Daily Steps'] = daily_steps
         
         with st.expander("Physiological Sleep Metrics", expanded=True):
             st.write("Enter your physiological sleep metrics for sleep quality assessment:")
@@ -572,46 +659,36 @@ def main():
             with col1:
                 # Collect input for quality model based on your preprocessing
                 hrv = st.number_input("Heart Rate Variability (ms)", min_value=40.0, max_value=120.0, 
-                                  value=st.session_state.quality_inputs.get('Heart_Rate_Variability', 70.0),
+                                  value=st.session_state.shared_inputs.get('Heart_Rate_Variability', 70.0),
                                   key="hrv_quality")
-                st.session_state.quality_inputs['Heart_Rate_Variability'] = hrv
+                st.session_state.shared_inputs['Heart_Rate_Variability'] = hrv
                 
                 body_temp = st.number_input("Body Temperature (°C)", min_value=36.0, max_value=38.0, 
-                                       value=st.session_state.quality_inputs.get('Body_Temperature', 36.8), 
+                                       value=st.session_state.shared_inputs.get('Body_Temperature', 36.8), 
                                        format="%.1f",
                                        key="body_temp_quality")
-                st.session_state.quality_inputs['Body_Temperature'] = body_temp
+                st.session_state.shared_inputs['Body_Temperature'] = body_temp
                 
                 movement = st.number_input("Movement During Sleep (index)", min_value=0.0, max_value=5.0, 
-                                      value=st.session_state.quality_inputs.get('Movement_During_Sleep', 1.5),
+                                      value=st.session_state.shared_inputs.get('Movement_During_Sleep', 1.5),
                                       key="movement_quality")
-                st.session_state.quality_inputs['Movement_During_Sleep'] = movement
-                
-                sleep_duration_quality = st.slider("Sleep Duration (hours)", 3.0, 12.0, 
-                                           st.session_state.quality_inputs.get('Sleep_Duration', 7.0), 0.1,
-                                           key="sleep_duration_quality")
-                st.session_state.quality_inputs['Sleep_Duration'] = sleep_duration_quality
+                st.session_state.shared_inputs['Movement_During_Sleep'] = movement
             
             with col2:
                 caffeine = st.number_input("Caffeine Intake (mg)", min_value=0, max_value=500, 
-                                       value=st.session_state.quality_inputs.get('Caffeine_Intake_mg', 100),
+                                       value=st.session_state.shared_inputs.get('Caffeine_Intake_mg', 100),
                                        key="caffeine_quality")
-                st.session_state.quality_inputs['Caffeine_Intake_mg'] = caffeine
-                
-                stress_quality = st.slider("Stress Level (1-10)", 1, 10, 
-                               st.session_state.quality_inputs.get('Stress_Level', 5),
-                               key="stress_quality")
-                st.session_state.quality_inputs['Stress_Level'] = stress_quality
+                st.session_state.shared_inputs['Caffeine_Intake_mg'] = caffeine
                 
                 bedtime_consistency = st.slider("Bedtime Consistency (0-1)", 0.0, 1.0, 
-                                           st.session_state.quality_inputs.get('Bedtime_Consistency', 0.7), 0.01,
+                                           st.session_state.shared_inputs.get('Bedtime_Consistency', 0.7), 0.01,
                                            key="bedtime_consistency_quality")
-                st.session_state.quality_inputs['Bedtime_Consistency'] = bedtime_consistency
+                st.session_state.shared_inputs['Bedtime_Consistency'] = bedtime_consistency
                 
                 light_exposure = st.number_input("Light Exposure (hours)", min_value=0.0, max_value=16.0, 
-                                            value=st.session_state.quality_inputs.get('Light_Exposure_hours', 8.0),
+                                            value=st.session_state.shared_inputs.get('Light_Exposure_hours', 8.0),
                                             key="light_exposure_quality")
-                st.session_state.quality_inputs['Light_Exposure_hours'] = light_exposure
+                st.session_state.shared_inputs['Light_Exposure_hours'] = light_exposure
         
         with st.expander("Sleep Audio Recording", expanded=True):
             st.write("Upload an audio recording of your sleep to analyze snoring patterns:")
@@ -637,22 +714,21 @@ def main():
         
         # Button to process sleep disorder prediction
         with col1:
-            # Button to process sleep disorder prediction
             if st.button("Analyze Sleep Disorder Risk", key="analyze_disorder_btn"):
-                # Prepare data for model - provide data in the format expected by the predict_sleep_disorder function
+                # Prepare data for model
                 input_dict = {
-                    'Age': st.session_state.disorder_inputs['Age'],
-                    'Gender': st.session_state.disorder_inputs['Gender'],  # Keep as string
-                    'Sleep Duration': st.session_state.disorder_inputs['Sleep Duration'],
-                    'Quality of Sleep': st.session_state.disorder_inputs['Quality of Sleep'],
-                    'Physical Activity Level': st.session_state.disorder_inputs['Physical Activity Level'],
-                    'Stress Level': st.session_state.disorder_inputs['Stress Level'],
-                    'BMI Category': st.session_state.disorder_inputs['BMI Category'],  # Keep as string
-                    'Heart Rate': st.session_state.disorder_inputs['Heart Rate'],
-                    'Daily Steps': st.session_state.disorder_inputs['Daily Steps'],
-                    'Systolic BP': st.session_state.disorder_inputs['Systolic BP'],
-                    'Diastolic BP': st.session_state.disorder_inputs['Diastolic BP'],
-                    'Occupation': st.session_state.disorder_inputs['Occupation']  # Keep as string
+                    'Age': st.session_state.shared_inputs['Age'],
+                    'Gender': st.session_state.shared_inputs['Gender'],
+                    'Sleep Duration': st.session_state.shared_inputs['Sleep Duration'],
+                    'Quality of Sleep': st.session_state.shared_inputs['Quality of Sleep'],
+                    'Physical Activity Level': st.session_state.shared_inputs['Physical Activity Level'],
+                    'Stress Level': st.session_state.shared_inputs['Stress Level'],
+                    'BMI Category': st.session_state.shared_inputs['BMI Category'],
+                    'Heart Rate': st.session_state.shared_inputs['Heart Rate'],
+                    'Daily Steps': st.session_state.shared_inputs['Daily Steps'],
+                    'Systolic BP': st.session_state.shared_inputs['Systolic BP'],
+                    'Diastolic BP': st.session_state.shared_inputs['Diastolic BP'],
+                    'Occupation': st.session_state.shared_inputs['Occupation']
                 }
                 
                 # Convert to DataFrame
@@ -660,23 +736,24 @@ def main():
                 
                 # Make prediction
                 with st.spinner("Analyzing sleep disorder risk..."):
-                    st.session_state.disorder_results = analyzer.predict_sleep_disorder(df)      
+                    st.session_state.disorder_results = analyzer.predict_sleep_disorder(df)
+                    
                     if st.session_state.disorder_results:
                         st.success("Sleep disorder analysis complete! Check the Results tab.")
         
         # Button to process sleep quality prediction
         with col2:
             if st.button("Analyze Sleep Quality", key="analyze_quality_btn"):
-                # Prepare data for model - using only the features needed for the quality model
+                # Prepare data for model - using shared inputs where appropriate
                 quality_df = pd.DataFrame([{
-                                        'Heart_Rate_Variability': st.session_state.quality_inputs['Heart_Rate_Variability'],
-                    'Body_Temperature': st.session_state.quality_inputs['Body_Temperature'],
-                    'Movement_During_Sleep': st.session_state.quality_inputs['Movement_During_Sleep'],
-                    'Sleep_Duration': st.session_state.quality_inputs['Sleep_Duration'],
-                    'Caffeine_Intake_mg': st.session_state.quality_inputs['Caffeine_Intake_mg'],
-                    'Stress_Level': st.session_state.quality_inputs['Stress_Level'],
-                    'Bedtime_Consistency': st.session_state.quality_inputs['Bedtime_Consistency'],
-                    'Light_Exposure_hours': st.session_state.quality_inputs['Light_Exposure_hours']
+                    'Heart_Rate_Variability': st.session_state.shared_inputs['Heart_Rate_Variability'],
+                    'Body_Temperature': st.session_state.shared_inputs['Body_Temperature'],
+                    'Movement_During_Sleep': st.session_state.shared_inputs['Movement_During_Sleep'],
+                    'Sleep_Duration': st.session_state.shared_inputs['Sleep Duration'],  # Using shared input
+                    'Caffeine_Intake_mg': st.session_state.shared_inputs['Caffeine_Intake_mg'],
+                    'Stress_Level': st.session_state.shared_inputs['Stress Level'],  # Using shared input
+                    'Bedtime_Consistency': st.session_state.shared_inputs['Bedtime_Consistency'],
+                    'Light_Exposure_hours': st.session_state.shared_inputs['Light_Exposure_hours']
                 }])
                 
                 # Make prediction
@@ -712,34 +789,34 @@ def main():
             
             with st.spinner("Running comprehensive sleep analysis..."):
                 # 1. Sleep disorder prediction
-                            
                 disorder_input = pd.DataFrame([{
-                    'Age': st.session_state.disorder_inputs['Age'],
-                    'Gender': st.session_state.disorder_inputs['Gender'],  # Keep as string
-                    'Sleep Duration': st.session_state.disorder_inputs['Sleep Duration'],
-                    'Quality of Sleep': st.session_state.disorder_inputs['Quality of Sleep'],
-                    'Physical Activity Level': st.session_state.disorder_inputs['Physical Activity Level'],
-                    'Stress Level': st.session_state.disorder_inputs['Stress Level'],
-                    'BMI Category': st.session_state.disorder_inputs['BMI Category'],  # Keep as string
-                    'Heart Rate': st.session_state.disorder_inputs['Heart Rate'],
-                    'Daily Steps': st.session_state.disorder_inputs['Daily Steps'],
-                    'Systolic BP': st.session_state.disorder_inputs['Systolic BP'],
-                    'Diastolic BP': st.session_state.disorder_inputs['Diastolic BP'],
-                    'Occupation': st.session_state.disorder_inputs['Occupation']  # Keep as string
+                    'Age': st.session_state.shared_inputs['Age'],
+                    'Gender': st.session_state.shared_inputs['Gender'],
+                    'Sleep Duration': st.session_state.shared_inputs['Sleep Duration'],
+                    'Quality of Sleep': st.session_state.shared_inputs['Quality of Sleep'],
+                    'Physical Activity Level': st.session_state.shared_inputs['Physical Activity Level'],
+                    'Stress Level': st.session_state.shared_inputs['Stress Level'],
+                    'BMI Category': st.session_state.shared_inputs['BMI Category'],
+                    'Heart Rate': st.session_state.shared_inputs['Heart Rate'],
+                    'Daily Steps': st.session_state.shared_inputs['Daily Steps'],
+                    'Systolic BP': st.session_state.shared_inputs['Systolic BP'],
+                    'Diastolic BP': st.session_state.shared_inputs['Diastolic BP'],
+                    'Occupation': st.session_state.shared_inputs['Occupation']
                 }])
                 
                 st.session_state.disorder_results = analyzer.predict_sleep_disorder(disorder_input)
                 
+            
                 # 2. Sleep quality prediction
                 quality_input = pd.DataFrame([{
-                    'Heart_Rate_Variability': st.session_state.quality_inputs['Heart_Rate_Variability'],
-                    'Body_Temperature': st.session_state.quality_inputs['Body_Temperature'],
-                    'Movement_During_Sleep': st.session_state.quality_inputs['Movement_During_Sleep'],
-                    'Sleep_Duration': st.session_state.quality_inputs['Sleep_Duration'],
-                    'Caffeine_Intake_mg': st.session_state.quality_inputs['Caffeine_Intake_mg'],
-                    'Stress_Level': st.session_state.quality_inputs['Stress_Level'],
-                    'Bedtime_Consistency': st.session_state.quality_inputs['Bedtime_Consistency'],
-                    'Light_Exposure_hours': st.session_state.quality_inputs['Light_Exposure_hours']
+                    'Heart_Rate_Variability': st.session_state.shared_inputs['Heart_Rate_Variability'],
+                    'Body_Temperature': st.session_state.shared_inputs['Body_Temperature'],
+                    'Movement_During_Sleep': st.session_state.shared_inputs['Movement_During_Sleep'],
+                    'Sleep_Duration': st.session_state.shared_inputs['Sleep Duration'],
+                    'Caffeine_Intake_mg': st.session_state.shared_inputs['Caffeine_Intake_mg'],
+                    'Stress_Level': st.session_state.shared_inputs['Stress Level'],
+                    'Bedtime_Consistency': st.session_state.shared_inputs['Bedtime_Consistency'],
+                    'Light_Exposure_hours': st.session_state.shared_inputs['Light_Exposure_hours']
                 }])
                 
                 st.session_state.quality_results = analyzer.predict_sleep_quality(quality_input)
@@ -810,14 +887,14 @@ def main():
                 st.write("#### Key Risk Factors")
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    st.metric("Sleep Duration", f"{st.session_state.disorder_inputs['Sleep Duration']:.1f} hrs")
-                    st.metric("BMI Category", st.session_state.disorder_inputs['BMI Category'])
+                    st.metric("Sleep Duration", f"{st.session_state.shared_inputs['Sleep Duration']:.1f} hrs")
+                    st.metric("BMI Category", st.session_state.shared_inputs['BMI Category'])
                 with col2:
-                    st.metric("Quality of Sleep", f"{st.session_state.disorder_inputs['Quality of Sleep']}/10")
-                    st.metric("Physical Activity", f"{st.session_state.disorder_inputs['Physical Activity Level']} min/day")
+                    # st.metric("Quality of Sleep", f"{st.session_state.shared_inputs['Quality of Sleep']}/10")
+                    st.metric("Physical Activity", f"{st.session_state.shared_inputs['Physical Activity Level']} min/day")
                 with col3:
-                    st.metric("Stress Level", f"{st.session_state.disorder_inputs['Stress Level']}/10")
-                    st.metric("Heart Rate", f"{st.session_state.disorder_inputs['Heart Rate']} bpm")
+                    st.metric("Stress Level", f"{st.session_state.shared_inputs['Stress Level']}/10")
+                    st.metric("Heart Rate", f"{st.session_state.shared_inputs['Heart Rate']} bpm")
             else:
                 st.info("Sleep disorder analysis not completed.")
         
@@ -827,11 +904,11 @@ def main():
                 
                 # Display result prominently
                 if quality_score <= 3:
-                    st.error(f"### Poor Sleep Quality: {quality_score:.1f}/10")
+                    st.error(f"### Poor Sleep Quality: {quality_score:.2f}/10")
                 elif quality_score <= 7:
-                    st.warning(f"### Moderate Sleep Quality: {quality_score:.1f}/10")
+                    st.warning(f"### Moderate Sleep Quality: {quality_score:.2f}/10")
                 else:
-                    st.success(f"### Good Sleep Quality: {quality_score:.1f}/10")
+                    st.success(f"### Good Sleep Quality: {quality_score:.2f}/10")
                 
                 # Display quality score
                 st.slider("Sleep Quality Score", 1, 10, int(quality_score), disabled=True, key="result_quality_score")
@@ -840,13 +917,13 @@ def main():
                 st.write("#### Key Physiological Metrics")
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
-                    st.metric("Heart Rate Variability", f"{st.session_state.quality_inputs['Heart_Rate_Variability']:.1f} ms")
+                    st.metric("Heart Rate Variability", f"{st.session_state.shared_inputs['Heart_Rate_Variability']:.1f} ms")
                 with col2:
-                    st.metric("Body Temperature", f"{st.session_state.quality_inputs['Body_Temperature']:.1f} °C")
+                    st.metric("Body Temperature", f"{st.session_state.shared_inputs['Body_Temperature']:.1f} °C")
                 with col3:
-                    st.metric("Movement", f"{st.session_state.quality_inputs['Movement_During_Sleep']:.2f} index")
+                    st.metric("Movement", f"{st.session_state.shared_inputs['Movement_During_Sleep']:.2f} index")
                 with col4:
-                    st.metric("Sleep Duration", f"{st.session_state.quality_inputs['Sleep_Duration']:.1f} hrs")
+                    st.metric("Sleep Duration", f"{st.session_state.shared_inputs['Sleep Duration']:.1f} hrs")
             else:
                 st.info("Sleep quality analysis not completed.")
         
@@ -898,8 +975,7 @@ def main():
         # Clear all results button
         if st.button("Clear All Results", key="clear_results_btn"):
             # Reset all session state values
-            st.session_state.disorder_inputs = {}
-            st.session_state.quality_inputs = {}
+            st.session_state.shared_inputs = {}
             st.session_state.audio_results = None
             st.session_state.disorder_results = None
             st.session_state.quality_results = None
