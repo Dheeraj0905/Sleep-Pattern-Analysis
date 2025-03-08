@@ -288,18 +288,18 @@ class SleepAnalyzer:
             return None
         
         try:
-            st.write(f"Input sleep duration data: {input_data['Sleep_Duration']}")
+            # st.write(f"Input sleep duration data: {input_data['Sleep_Duration']}")
             # Access the model and preprocessing info
             model = self.quality_model['model'] if isinstance(self.quality_model, dict) else self.quality_model
             scaler = self.quality_model.get('scaler', None) if isinstance(self.quality_model, dict) else None
             feature_list = self.quality_model.get('feature_list', None) if isinstance(self.quality_model, dict) else None
             
             # Debug information
-            st.write(f"Quality model type: {type(model)}")
+            # st.write(f"Quality model type: {type(model)}")
             
             # Clone input data to avoid modifying original
             sample_df = input_data.copy()
-            st.write(f"Sample_df before: {sample_df}")
+            # st.write(f"Sample_df before: {sample_df}")
             # Map variable names if needed
             # This step ensures we use the right feature names as expected by the model
             # If your model expects Sleep_Duration but you have Sleep Duration in your input
@@ -318,7 +318,7 @@ class SleepAnalyzer:
             if scaler is not None:
                 numerical_cols = sample_df.select_dtypes(include=['float64', 'int64']).columns
                 sample_df[numerical_cols] = scaler.transform(sample_df[numerical_cols])
-            st.write(f"Sample_df after: {sample_df}")
+            # st.write(f"Sample_df after: {sample_df}")
             # Ensure features are in the correct order if we have the feature list
             if feature_list:
                 for feature in feature_list:
@@ -370,11 +370,11 @@ class SleepAnalyzer:
                 final_score = quality_score
             
             # For debugging: show both scores
-            st.write(f"Model raw score: {raw_prediction}, Scaled: {quality_score}, Weighted: {weighted_score}")
+            # st.write(f"Model raw score: {raw_prediction}, Scaled: {quality_score}, Weighted: {weighted_score}")
             
             return {
                 # 'score': final_score,
-                'score': raw_prediction,
+                'score': weighted_score,
                 'raw_prediction': raw_prediction
             }
             
@@ -541,8 +541,8 @@ def main():
     st.set_page_config(page_title="Comprehensive Sleep Analysis", layout="wide")
     
     st.title("Comprehensive Sleep Analysis")
-    st.write(f"Current Date and Time (UTC): 2025-03-07 15:54:46")
-    st.write(f"Current User's Login: Mangun10")
+    # st.write(f"Current Date and Time (UTC): 2025-03-07 15:54:46")
+    # st.write(f"Current User's Login: Mangun10")
     
     # Initialize analyzer
     analyzer = SleepAnalyzer(
@@ -550,7 +550,11 @@ def main():
         disorder_model_path='models/sleep_disorder_model.pkl',
         quality_model_path='models/sleep_quality_model.pkl'
     )
-    
+    # st.write(analyzer )
+    # Display information
+    st.write("This app provides a comprehensive analysis of your sleep quality, sleep disorders, and snoring patterns.")
+    st.write("Please provide the required information and upload an audio recording of your sleep for analysis.")
+
     # Create tabs (only 2 as requested)
     tab1, tab2 = st.tabs(["Input Data", "Analysis Results"])
     
