@@ -83,14 +83,20 @@ class SleepAnalyzer:
             total_duration_seconds = len(y) / self.sr
             total_duration_minutes = total_duration_seconds / 60
             
+            # Provide debug information
             st.info(f"Analyzing audio: {total_duration_minutes:.2f} minutes duration")
+            
+            # For very short recordings, adjust segment duration
+            if total_duration_seconds < segment_duration:
+                segment_duration = max(1, total_duration_seconds)  # Use at least 1 second
+                st.info(f"Short recording detected. Adjusting segment duration to {segment_duration} seconds")
             
             # Create a progress bar
             progress_bar = st.progress(0)
             
             # Split into segments
             segment_samples = int(self.sr * segment_duration)
-            n_segments = int(np.ceil(len(y) / segment_samples))
+            n_segments = max(1, int(np.ceil(len(y) / segment_samples)))
             
             # Initialize variables
             snoring_segments = []
@@ -108,8 +114,8 @@ class SleepAnalyzer:
                 segment_end_time = end_sample / self.sr
                 
                 # Split into 1-second sub-segments
-                sub_segment_length = self.sr
-                n_sub_segments = int(np.ceil(len(segment) / sub_segment_length))
+                sub_segment_length = self.sr  # 1 second of samples
+                n_sub_segments = max(1, int(np.ceil(len(segment) / sub_segment_length)))
                 
                 # Count snoring in sub-segments
                 sub_segment_snoring_count = 0
@@ -121,31 +127,39 @@ class SleepAnalyzer:
                     sub_end = min(sub_start + sub_segment_length, len(segment))
                     sub_segment = segment[sub_start:sub_end]
                     
-                    # Skip if too short
-                    if len(sub_segment) < 0.5 * sub_segment_length:
+                    # Skip if too short - reduced threshold for short recordings
+                    min_length = 0.3 * self.sr  # 300ms minimum
+                    if len(sub_segment) < min_length:
                         continue
                     
-                    # Extract features
-                    mfccs = self.extract_features(sub_segment)
+                    try:
+                        # Extract features
+                        mfccs = self.extract_features(sub_segment)
+                        
+                        if mfccs is None or mfccs.size == 0:
+                            continue
+                        
+                        # Prepare for model input
+                        mfccs = mfccs[np.newaxis, ..., np.newaxis]
+                        
+                        # Make prediction
+                        pred = self.audio_model.predict(mfccs, verbose=0)[0]
+                        pred_class = np.argmax(pred)
+                        confidence = pred[pred_class]
+                        
+                        # If snoring detected
+                        if pred_class == 1:  # 1 = snoring
+                            sub_segment_snoring_count += 1
+                            sub_segment_confidences.append(float(confidence))
                     
-                    if mfccs is None:
+                    except Exception as sub_error:
+                        st.warning(f"Error processing sub-segment {j}: {str(sub_error)}")
                         continue
-                    
-                    # Prepare for model input
-                    mfccs = mfccs[np.newaxis, ..., np.newaxis]
-                    
-                    # Make prediction
-                    pred = self.audio_model.predict(mfccs, verbose=0)[0]
-                    pred_class = np.argmax(pred)
-                    confidence = pred[pred_class]
-                    
-                    # If snoring detected
-                    if pred_class == 1:  # 1 = snoring
-                        sub_segment_snoring_count += 1
-                        sub_segment_confidences.append(float(confidence))
                 
                 # If significant snoring detected in the segment
-                if sub_segment_snoring_count > 0.3 * n_sub_segments:
+                # Adjust threshold based on number of valid sub-segments
+                valid_sub_segments = min(n_sub_segments, 1)  # Avoid division by zero
+                if sub_segment_snoring_count > 0:  # For short recordings, detect any snoring
                     avg_confidence = np.mean(sub_segment_confidences) if sub_segment_confidences else 0
                     snoring_segments.append((segment_start_time, segment_end_time))
                     snoring_confidences.append(avg_confidence)
@@ -159,8 +173,8 @@ class SleepAnalyzer:
             snoring_segments_count = len(snoring_segments)
             
             # Calculate snoring frequency (episodes per hour)
-            hours_of_sleep = total_duration_seconds / 3600
-            snoring_frequency = snoring_segments_count / hours_of_sleep if hours_of_sleep > 0 else 0
+            hours_of_sleep = max(total_duration_seconds / 3600, 0.0001)  # Avoid division by zero
+            snoring_frequency = snoring_segments_count / hours_of_sleep
             
             # Prepare results
             results = {
@@ -178,6 +192,8 @@ class SleepAnalyzer:
             
         except Exception as e:
             st.error(f"Error analyzing audio: {str(e)}")
+            import traceback
+            st.error(f"Full error details: {traceback.format_exc()}")
             return None
     
     def predict_sleep_disorder(self, input_data):
@@ -251,8 +267,24 @@ class SleepAnalyzer:
             pred_proba = model.predict_proba(sample_df)[0]
             prob_dict = {target_encoder.inverse_transform([i])[0]: prob for i, prob in enumerate(pred_proba)}
             
-            # Determine if we should predict "None" based on probability thresholds
-            # If no disorder has high enough confidence, classify as "None"
+            if "Insomnia" in prob_dict and "Sleep Apnea" in prob_dict:
+                # Calculate the difference in probabilities
+                prob_diff = abs(prob_dict["Insomnia"] - prob_dict["Sleep Apnea"])
+                
+                # If difference is less than 0.1, return "None"
+                if prob_diff < 0.1:
+                    prediction = "None"
+                    # Adjust probabilities to reflect uncertainty
+                    if "None" in prob_dict:
+                        prob_dict["None"] = max(prob_dict["None"], 0.6)  # Boost "None" probability
+                    else:
+                        prob_dict["None"] = 0.6
+                    
+                    # Reduce the probabilities of the uncertain disorders
+                    prob_dict["Insomnia"] = min(prob_dict["Insomnia"], 0.3)
+                    prob_dict["Sleep Apnea"] = min(prob_dict["Sleep Apnea"], 0.3)
+            
+            # Also check the maximum probability threshold
             max_prob_key = max(prob_dict, key=prob_dict.get)
             max_prob_value = prob_dict[max_prob_key]
             
@@ -284,94 +316,89 @@ class SleepAnalyzer:
             return None
         
         try:
-            # st.write(f"Input sleep duration data: {input_data['Sleep_Duration']}")
             # Access the model and preprocessing info
             model = self.quality_model['model'] if isinstance(self.quality_model, dict) else self.quality_model
             scaler = self.quality_model.get('scaler', None) if isinstance(self.quality_model, dict) else None
             feature_list = self.quality_model.get('feature_list', None) if isinstance(self.quality_model, dict) else None
             
-            # Debug information
+            # Debug the model and input
             # st.write(f"Quality model type: {type(model)}")
+            # st.write(f"Input columns: {input_data.columns.tolist()}")
             
             # Clone input data to avoid modifying original
             sample_df = input_data.copy()
-            # st.write(f"Sample_df before: {sample_df}")
+            
             # Map variable names if needed
-            # This step ensures we use the right feature names as expected by the model
-            # If your model expects Sleep_Duration but you have Sleep Duration in your input
             if 'Sleep Duration' in sample_df.columns and 'Sleep_Duration' not in sample_df.columns:
                 sample_df['Sleep_Duration'] = sample_df['Sleep Duration']
             
             if 'Stress Level' in sample_df.columns and 'Stress_Level' not in sample_df.columns:
                 sample_df['Stress_Level'] = sample_df['Stress Level']
             
-            # Feature engineering for sleep quality model
-            # sample_df['Sleep_Efficiency'] = (sample_df['Sleep_Duration'] * sample_df['Bedtime_Consistency']) / 10
-            # sample_df['Temperature_Movement_Factor'] = sample_df['Body_Temperature'] * sample_df['Movement_During_Sleep']
-            # sample_df['Caffeine_Light_Ratio'] = sample_df['Caffeine_Intake_mg'] / (sample_df['Light_Exposure_hours'] * 50 + 1)
+            # Define the expected columns based on your training data
+            expected_columns = [
+                'Heart_Rate_Variability', 
+                'Body_Temperature', 
+                'Movement_During_Sleep', 
+                'Sleep_Duration', 
+                'Caffeine_Intake_mg', 
+                'Stress_Level', 
+                'Bedtime_Consistency',
+                'Light_Exposure_hours'
+            ]
+            
+            # Create a new DataFrame with all required columns
+            prediction_df = pd.DataFrame()
+            
+            # Copy existing columns or create with default values
+            for col in expected_columns:
+                if col in sample_df.columns:
+                    prediction_df[col] = sample_df[col]
+                else:
+                    st.warning(f"Missing required feature: {col}. Using default value 0.")
+                    prediction_df[col] = 0
             
             # If we have a scaler, use it
             if scaler is not None:
-                numerical_cols = sample_df.select_dtypes(include=['float64', 'int64']).columns
-                sample_df[numerical_cols] = scaler.transform(sample_df[numerical_cols])
-            # st.write(f"Sample_df after: {sample_df}")
+                try:
+                    # Scale using all the expected columns
+                    prediction_df = pd.DataFrame(
+                        scaler.transform(prediction_df),
+                        columns=prediction_df.columns,
+                        index=prediction_df.index
+                    )
+                except ValueError as scale_error:
+                    st.error(f"Error during scaling: {scale_error}")
+                    # If there's an error with the scaler, let's try using the raw features
+                    st.warning("Proceeding with unscaled features.")
+            
             # Ensure features are in the correct order if we have the feature list
             if feature_list:
-                for feature in feature_list:
-                    if feature not in sample_df.columns:
-                        sample_df[feature] = 0
-                sample_df = sample_df[feature_list]
+                # Check if all required features exist
+                missing_features = [f for f in feature_list if f not in prediction_df.columns]
+                if missing_features:
+                    st.warning(f"Missing features from model's feature list: {missing_features}")
+                    for feat in missing_features:
+                        prediction_df[feat] = 0
+                
+                # Reorder columns to match the feature list
+                prediction_df = prediction_df[feature_list]
             
-            # Make prediction
-            raw_prediction = model.predict(sample_df)
+            # Make prediction with the model
+            raw_prediction = model.predict(prediction_df)
             
             # Convert prediction to a scalar if it's an array
             if hasattr(raw_prediction, '__iter__'):
                 raw_prediction = raw_prediction[0]
             
-            # Convert the prediction to a sleep quality score on a 1-10 scale
-            # Different models might need different scaling approaches
+            quality_score = raw_prediction
             
-            # First, determine the range of possible values for your model
-            # For regression models, this might be based on the training data range
-            # For some models, like Random Forest, it might be the specific output range
-            
-            # Method 1: Linear scaling from the model's output range to 1-10
-            # Assuming the model predicts values in a different range, e.g., 0-1 or 0-100
-            min_model_output = 0.0  # Adjust based on your model's minimum output
-            max_model_output = 1.0  # Adjust based on your model's maximum output
-            
-            # Clamp the raw prediction to the expected range
-            clamped_prediction = max(min_model_output, min(max_model_output, raw_prediction))
-            
-            # Scale to 1-10 range
-            quality_score = 1 + (clamped_prediction - min_model_output) * 9 / (max_model_output - min_model_output)
-            
-            # Method 2: Calculate a weighted score based on input features
-            # This can serve as a backup if the model isn't giving varied outputs
-            weighted_score = (
-                (10 - sample_df['Movement_During_Sleep'].iloc[0] * 2) * 0.2 +
-                (sample_df['Sleep_Duration'].iloc[0] / 10 * 10) * 0.3 +
-                (10 - sample_df['Caffeine_Intake_mg'].iloc[0] / 50) * 0.1 +
-                (10 - sample_df['Stress_Level'].iloc[0]) * 0.15 +
-                (sample_df['Bedtime_Consistency'].iloc[0] * 10) * 0.15 +
-                (sample_df['Light_Exposure_hours'].iloc[0] / 12 * 10) * 0.1
-            )
-            weighted_score = max(1, min(10, weighted_score))
-            
-            # Use a combination of both methods, favoring the model when it gives reasonable values
-            if abs(quality_score - 2.6) < 0.1:  # If the model keeps giving ~2.6
-                final_score = weighted_score
-            else:
-                final_score = quality_score
-            
-            # For debugging: show both scores
-            # st.write(f"Model raw score: {raw_prediction}, Scaled: {quality_score}, Weighted: {weighted_score}")
+            # For debugging
+            # st.write(f"Raw model prediction: {raw_prediction}")
             
             return {
-                # 'score': final_score,
-                'score': weighted_score,
-                'raw_prediction': raw_prediction
+                'score': float(quality_score),
+                'raw_prediction': float(raw_prediction)
             }
             
         except Exception as e:
