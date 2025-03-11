@@ -11,10 +11,6 @@ from tensorflow.keras.models import load_model
 import warnings
 warnings.filterwarnings('ignore')
 
-# Current information
-CURRENT_DATE = "2025-03-07 12:10:48"
-USER_LOGIN = "Mangun10"
-
 class SleepAnalyzer:
     def __init__(self, 
              audio_model_path='models/sleep_audio_model.h5',
