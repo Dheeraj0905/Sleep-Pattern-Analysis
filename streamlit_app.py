@@ -10,7 +10,7 @@ import pickle
 from tensorflow.keras.models import load_model
 import warnings
 warnings.filterwarnings('ignore')
-st.write(f"Current Date and Time (UTC): 2025-03-08 16:22:00")
+
 class SleepAnalyzer:
     def __init__(self, 
              audio_model_path='models/sleep_audio_model.h5',
