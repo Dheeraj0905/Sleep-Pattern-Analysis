@@ -267,22 +267,22 @@ class SleepAnalyzer:
             pred_proba = model.predict_proba(sample_df)[0]
             prob_dict = {target_encoder.inverse_transform([i])[0]: prob for i, prob in enumerate(pred_proba)}
             
-            if "Insomnia" in prob_dict and "Sleep Apnea" in prob_dict:
-                # Calculate the difference in probabilities
-                prob_diff = abs(prob_dict["Insomnia"] - prob_dict["Sleep Apnea"])
+            # if "Insomnia" in prob_dict and "Sleep Apnea" in prob_dict:
+            #     # Calculate the difference in probabilities
+            #     prob_diff = abs(prob_dict["Insomnia"] - prob_dict["Sleep Apnea"])
                 
-                # If difference is less than 0.1, return "None"
-                if prob_diff < 0.1:
-                    prediction = "None"
-                    # Adjust probabilities to reflect uncertainty
-                    if "None" in prob_dict:
-                        prob_dict["None"] = max(prob_dict["None"], 0.6)  # Boost "None" probability
-                    else:
-                        prob_dict["None"] = 0.6
+            #     # If difference is less than 0.1, return "None"
+            #     if prob_diff < 0.1:
+            #         prediction = "None"
+            #         # Adjust probabilities to reflect uncertainty
+            #         if "None" in prob_dict:
+            #             prob_dict["None"] = max(prob_dict["None"], 0.6)  # Boost "None" probability
+            #         else:
+            #             prob_dict["None"] = 0.6
                     
-                    # Reduce the probabilities of the uncertain disorders
-                    prob_dict["Insomnia"] = min(prob_dict["Insomnia"], 0.3)
-                    prob_dict["Sleep Apnea"] = min(prob_dict["Sleep Apnea"], 0.3)
+            #         # Reduce the probabilities of the uncertain disorders
+            #         prob_dict["Insomnia"] = min(prob_dict["Insomnia"], 0.3)
+            #         prob_dict["Sleep Apnea"] = min(prob_dict["Sleep Apnea"], 0.3)
             
             # Also check the maximum probability threshold
             max_prob_key = max(prob_dict, key=prob_dict.get)
@@ -290,13 +290,13 @@ class SleepAnalyzer:
             
             # If the maximum probability is less than 0.5, classify as "None"
             # Adjust this threshold as necessary
-            if max_prob_value < 0.5:
-                prediction = "None"
-                # Add or adjust the "None" probability in the dictionary
-                if "None" in prob_dict:
-                    prob_dict["None"] = max(prob_dict["None"], 1 - max_prob_value)
-                else:
-                    prob_dict["None"] = 1 - max_prob_value
+            # if max_prob_value < 0.5:
+            #     prediction = "None"
+            #     # Add or adjust the "None" probability in the dictionary
+            #     if "None" in prob_dict:
+            #         prob_dict["None"] = max(prob_dict["None"], 1 - max_prob_value)
+            #     else:
+            #         prob_dict["None"] = 1 - max_prob_value
             
             return {
                 'prediction': prediction,
